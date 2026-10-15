@@ -14,18 +14,16 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================
 # CONFIGURATION
 # ============================================================
-# Paths
-base_dir = Path(r"path\to\your\TxtInOut")          # Original SWAT+ model folder
-swat_executable = Path(r"path\to\swat_exe")               # SWAT+ executable
+base_dir = Path(r"F:\E\Master courses\Semesters\SWAT+\Model\Yellow River Watershed II\Scenarios\Default\TxtInOut")
+swat_executable = Path(r"C:\SWAT\SWATPlus\SWATPlusEditor\resources\app.asar.unpacked\static\swat_exe\rev61.0.1_64rel.exe")
 
-output_dir = Path(r"path\to\output_folder")          # Where results will be saved
-target_channel = "cha038"                                # Channel name to extract flow from
-log_file = Path(r"path\to\log_file.txt")
+output_dir = Path(r"F:\E\Master courses\Semesters\SWAT+\sensitivity_analysis_runs_parallel_128_4")
+target_channel = "cha001"
+log_file = Path(r"F:\E\Master courses\Semesters\SWAT+\sensitivity_log_128_4.txt")
 
-# Analysis settings
-N           = 128     # Base sample size
-MAX_WORKERS = 6       # Number of parallel processes
-SAVE_EVERY  = 100     # Save intermediate results every N completed runs
+N = 128
+MAX_WORKERS = 6
+SAVE_EVERY = 100
 
 # ============================================================
 # PROBLEM DEFINITION
@@ -63,34 +61,70 @@ def create_run_dir(run_dir: Path) -> bool:
 
 
 def write_calibration_cal(run_dir: Path, params: dict) -> bool:
+    """Write the parameter changes for the current run into calibration.cal"""
     try:
-        lines = []
-        # Header line (keep consistent with SWAT+ editor style)
-        lines.append("calibration.cal: written by SWAT+ editor v2.1.3\n")
-        lines.append(f"{len(params)}\n")
-        lines.append("cal_parm               chg_typ       chg_val     conds  soil_lyr1  soil_lyr2       yr1       yr2      day1      day2   obj_tot\n")
-
-        for name, value in params.items():
-            # Decide change type
-            if name in ["awc", "k", "revap_min", "latq_co"]:
-                chg_typ = "pctchg"
-            else:
-                chg_typ = "absval"
-
-            # Format line with 11 fields
-            line = f"{name:<22}{chg_typ:<12}{value:10.5f}     0         0         0         0         0         0         0         0\n"
-            lines.append(line)
-
-        cal_file = run_dir / "calibration.cal"
+        cal_file = run_dir / "calibration.cal"          # ← correct filename
         with open(cal_file, "w") as f:
-            f.writelines(lines)
-
+            f.write("calibration.cal: written by sensitivity script\n")
+            f.write(f"{len(params)}\n")
+            f.write("cal_parm               chg_typ       chg_val     conds  soil_lyr1  soil_lyr2       yr1       yr2      day1      day2   obj_tot\n")
+            
+            for name, value in params.items():
+                # Soil parameters usually use percentage change
+                if name in ["awc", "k"]:
+                    chg_typ = "pctchg"
+                else:
+                    chg_typ = "absval"
+                
+                line = (f"{name:<22}"
+                        f"{chg_typ:<12}"
+                        f"{value:10.5f}"
+                        f"{'0':>6}"
+                        f"{'0':>10}"
+                        f"{'0':>10}"
+                        f"{'0':>10}"
+                        f"{'0':>10}"
+                        f"{'0':>10}"
+                        f"{'0':>10}"
+                        f"{'0':>10}\n")
+                f.write(line)
         return True
     except Exception as e:
         print(f"write_calibration_cal failed: {e}")
         return False
 
+def ensure_calibration_in_file_cio(run_dir: Path) -> bool:
+    """Make sure file.cio tells SWAT+ to read calibration.cal"""
+    try:
+        cio_file = run_dir / "file.cio"
+        if not cio_file.exists():
+            print("file.cio not found!")
+            return False
 
+        lines = cio_file.read_text().splitlines()
+        new_lines = []
+        changed = False
+
+        for line in lines:
+            # Look for the change line (starts with "chg")
+            if line.strip().lower().startswith("chg"):
+                # Force the correct format
+                new_line = "chg cal_parms.cal calibration.cal null null null null null null null"
+                new_lines.append(new_line)
+                changed = True
+            else:
+                new_lines.append(line)
+
+        if changed:
+            cio_file.write_text("\n".join(new_lines) + "\n")
+        else:
+            print("Warning: could not find 'chg' line in file.cio")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"ensure_calibration_in_file_cio failed: {e}")
+        return False
 
 def run_swat(run_dir: Path) -> bool:
     try:
@@ -109,7 +143,7 @@ def run_swat(run_dir: Path) -> bool:
 
 
 def extract_flow(run_dir: Path):
-    output_file = run_dir / "channel_sd_mon.txt"
+    output_file = run_dir / "channel_sd_day.txt"
     if not output_file.exists():
         return None
     try:
@@ -141,6 +175,9 @@ def process_one_run(args):
 
     try:
         if create_run_dir(run_dir):
+            # Make sure file.cio activates calibration.cal
+            ensure_calibration_in_file_cio(run_dir)
+
             param_dict = dict(zip(problem['names'], params))
             if write_calibration_cal(run_dir, param_dict):
                 if run_swat(run_dir):
